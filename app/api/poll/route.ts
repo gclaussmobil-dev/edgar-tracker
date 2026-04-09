@@ -38,17 +38,27 @@ export async function GET(req: NextRequest) {
       getNvdaFinancials(),
     ]);
 
-    // Form 4: fetch and parse actual XML
+    // Form 4: fetch all XMLs in parallel, then upsert in parallel
     const form4Filings = extractForm4Filings(submissions);
-    for (const filing of form4Filings) {
-      try {
-        const xml = await fetchForm4Xml(filing.accession);
-        const parsed = parseForm4Xml(xml);
-        console.log(`Form 4 ${filing.accession}: parsed=${parsed.length} firstOwner=${parsed[0]?.ownerName} firstShares=${parsed[0]?.shares} firstDate=${parsed[0]?.transactionDate} firstPrice=${parsed[0]?.pricePerShare}`);
-        for (const tx of parsed) {
-          await supabaseAdmin
-            .from('insider_trades')
-            .upsert(
+    const form4Results = await Promise.all(
+      form4Filings.map(async (filing) => {
+        try {
+          const xml = await fetchForm4Xml(filing.accession);
+          const parsed = parseForm4Xml(xml);
+          return { filing, parsed, error: null };
+        } catch (err) {
+          console.error(`Form 4 XML failed for ${filing.accession}:`, err);
+          return { filing, parsed: [], error: err };
+        }
+      })
+    );
+
+    // Upsert all Form 4 results in parallel
+    await Promise.all(
+      form4Results.flatMap(({ filing, parsed }) => {
+        if (parsed.length > 0) {
+          return parsed.map((tx) =>
+            supabaseAdmin.from('insider_trades').upsert(
               {
                 accession_number: filing.accession,
                 filed_at: tx.transactionDate
@@ -64,27 +74,26 @@ export async function GET(req: NextRequest) {
                 direct_indirect: tx.directIndirect,
               },
               { onConflict: 'accession_number', ignoreDuplicates: false }
-            );
-        }
-      } catch (err) {
-        console.error(`Form 4 XML failed for ${filing.accession}:`, err);
-        // Fallback: upsert with placeholder so filing timestamp is preserved;
-        // ignoreDuplicates: false ensures this can be overwritten once parsing is fixed
-        await supabaseAdmin
-          .from('insider_trades')
-          .upsert(
-            {
-              accession_number: filing.accession,
-              filed_at: new Date(filing.date).toISOString(),
-              person_name: 'Pending Parse',
-              role: 'Unknown',
-              transaction_code: 'S',
-              shares: 0,
-            },
-            { onConflict: 'accession_number', ignoreDuplicates: false }
+            )
           );
-      }
-    }
+        } else {
+          // Fallback: preserve filing timestamp
+          return [
+            supabaseAdmin.from('insider_trades').upsert(
+              {
+                accession_number: filing.accession,
+                filed_at: new Date(filing.date).toISOString(),
+                person_name: 'Pending Parse',
+                role: 'Unknown',
+                transaction_code: 'S',
+                shares: 0,
+              },
+              { onConflict: 'accession_number', ignoreDuplicates: false }
+            ),
+          ];
+        }
+      })
+    );
 
     // XBRL Finanzdaten verarbeiten
     const revenues = extractRevenue(facts);
@@ -145,42 +154,36 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // 8-K Events verarbeiten
+    // 8-K Events: fetch and parse all in parallel
     const events8K = extract8KFilings(submissions);
-    for (const ev of events8K) {
-      try {
-        const xml = await fetch8KXml(ev.accession);
-        const { eventType, description } = parse8KXml(xml);
-        await supabaseAdmin
-          .from('material_events')
-          .upsert(
-            {
-              accession_number: ev.accession,
-              filed_at: new Date(ev.date).toISOString(),
-              event_type: eventType,
-              description: description,
-              filing_url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K`,
-            },
-            { onConflict: 'accession_number', ignoreDuplicates: false }
-          );
-      } catch (err) {
-        console.error(`Failed to fetch/parse 8-K ${ev.accession}:`, err);
-        // Fallback: preserve filing timestamp; ignoreDuplicates: false so real data
-        // can overwrite this placeholder once parsing is fixed
-        await supabaseAdmin
-          .from('material_events')
-          .upsert(
-            {
-              accession_number: ev.accession,
-              filed_at: new Date(ev.date).toISOString(),
-              event_type: 'other',
-              description: '8-K Filing',
-              filing_url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K`,
-            },
-            { onConflict: 'accession_number', ignoreDuplicates: false }
-          );
-      }
-    }
+    const eventResults = await Promise.all(
+      events8K.map(async (ev) => {
+        try {
+          const xml = await fetch8KXml(ev.accession);
+          const { eventType, description } = parse8KXml(xml);
+          return { ev, eventType, description, error: null };
+        } catch (err) {
+          console.error(`Failed to fetch/parse 8-K ${ev.accession}:`, err);
+          return { ev, eventType: 'other', description: '8-K Filing', error: err };
+        }
+      })
+    );
+
+    // Upsert all 8-K events in parallel
+    await Promise.all(
+      eventResults.map(({ ev, eventType, description }) =>
+        supabaseAdmin.from('material_events').upsert(
+          {
+            accession_number: ev.accession,
+            filed_at: new Date(ev.date).toISOString(),
+            event_type: eventType,
+            description: description,
+            filing_url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K`,
+          },
+          { onConflict: 'accession_number', ignoreDuplicates: false }
+        )
+      )
+    );
 
     // KI-Zusammenfassung aktualisieren
     const { data: trades } = await supabaseAdmin
