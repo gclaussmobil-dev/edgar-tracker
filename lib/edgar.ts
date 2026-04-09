@@ -31,10 +31,14 @@ export async function getNvdaFinancials() {
 }
 
 // Extrahiert Revenue aus XBRL companyfacts JSON
+// NVIDIA uses Revenues for its filings (both annual and quarterly)
+// RevenueFromContractWithCustomerExcludingAssessedTax only has old 10-K data
 export function extractRevenue(facts: any): { period: string; value: number }[] {
-  const revenues =
-    facts?.facts?.['us-gaap']?.RevenueFromContractWithCustomerExcludingAssessedTax?.units?.USD ?? [];
-  return revenues
+  // Combine both tags — Revenues has all current filings, the other has legacy data
+  const fromRevenues = facts?.facts?.['us-gaap']?.Revenues?.units?.USD ?? [];
+  const fromContract = facts?.facts?.['us-gaap']?.RevenueFromContractWithCustomerExcludingAssessedTax?.units?.USD ?? [];
+  const combined = [...fromRevenues, ...fromContract];
+  return combined
     .filter((r: any) => r.form === '10-Q' || r.form === '10-K')
     .map((r: any) => ({ period: r.end, value: r.val }))
     .sort((a: any, b: any) => b.period.localeCompare(a.period))
