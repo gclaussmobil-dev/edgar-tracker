@@ -177,8 +177,19 @@ export function parseForm4Xml(xml: string): {
   directIndirect: string;
   transactionDate: string;
 }[] {
-  // Attempt fast-xml-parser first
-  const parsed = xmlParser.parse(xml);
+  // Extract the actual XML block — SEC .txt files have SGML headers before the XML.
+  // e.g. "<SEC-DOCUMENT>0001199039-26-000003.txt : 20260324\r\n<SEC-HEADER>..."
+  // We need the portion starting from <?xml or <ownershipDocument>
+  let xmlBlock = xml;
+  const xmlStart = xml.indexOf('<?xml');
+  const ownershipStart = xml.indexOf('<ownershipDocument');
+  const start = xmlStart >= 0 ? xmlStart : ownershipStart;
+  if (start > 0) {
+    xmlBlock = xml.substring(start);
+  }
+
+  // Attempt fast-xml-parser on the extracted XML block
+  const parsed = xmlParser.parse(xmlBlock);
   const document = parsed['ownership-document'] ?? parsed;
 
   const getField = (obj: any, path: string): any => {
