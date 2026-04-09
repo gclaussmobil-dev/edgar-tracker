@@ -10,6 +10,14 @@ import {
   extractRevenue,
   extractNetIncome,
   extractEPS,
+  extractOperatingCashFlow,
+  extractCapitalExpenditures,
+  fetchForm4Xml,
+  parseForm4Xml,
+  fetch13FInfoTableXml,
+  parse13FXml,
+  fetch8KXml,
+  parse8KXml,
 } from '@/lib/edgar';
 import { generateNvdaSummary } from '@/lib/claude';
 
@@ -30,32 +38,66 @@ export async function GET(req: NextRequest) {
       getNvdaFinancials(),
     ]);
 
-    // Form 4 verarbeiten
+    // Form 4: fetch and parse actual XML
     const form4Filings = extractForm4Filings(submissions);
     for (const filing of form4Filings) {
-      await supabaseAdmin
-        .from('insider_trades')
-        .upsert(
-          {
-            accession_number: filing.accession,
-            filed_at: new Date(filing.date).toISOString(),
-            person_name: 'Pending Parse',
-            role: 'Unknown',
-            transaction_code: 'S',
-            shares: 0,
-          },
-          { onConflict: 'accession_number', ignoreDuplicates: true }
-        );
+      try {
+        const xml = await fetchForm4Xml(filing.accession);
+        const parsed = parseForm4Xml(xml);
+        for (const tx of parsed) {
+          await supabaseAdmin
+            .from('insider_trades')
+            .upsert(
+              {
+                accession_number: filing.accession,
+                filed_at: new Date(tx.transactionDate).toISOString(),
+                person_name: tx.ownerName,
+                role: 'Insider',
+                transaction_code: tx.transactionCode,
+                shares: tx.shares,
+                price_per_share: tx.pricePerShare,
+                total_value: tx.shares * tx.pricePerShare,
+                shares_owned_after: tx.sharesOwnedAfter,
+                direct_indirect: tx.directIndirect,
+              },
+              { onConflict: 'accession_number', ignoreDuplicates: true }
+            );
+        }
+      } catch (err) {
+        console.warn(`Failed to fetch/parse Form 4 ${filing.accession}:`, err);
+        // Fallback: upsert with minimal data so we at least have the filing record
+        await supabaseAdmin
+          .from('insider_trades')
+          .upsert(
+            {
+              accession_number: filing.accession,
+              filed_at: new Date(filing.date).toISOString(),
+              person_name: 'Pending Parse',
+              role: 'Unknown',
+              transaction_code: 'S',
+              shares: 0,
+            },
+            { onConflict: 'accession_number', ignoreDuplicates: true }
+          );
+      }
     }
 
     // XBRL Finanzdaten verarbeiten
     const revenues = extractRevenue(facts);
     const netIncomes = extractNetIncome(facts);
     const epsList = extractEPS(facts);
+    const opCashFlows = extractOperatingCashFlow(facts);
+    const capExs = extractCapitalExpenditures(facts);
 
     for (const rev of revenues) {
       const ni = netIncomes.find((n) => n.period === rev.period);
       const eps = epsList.find((e) => e.period === rev.period);
+      const opCf = opCashFlows.find((o) => o.period === rev.period);
+      const capEx = capExs.find((c) => c.period === rev.period);
+      const freeCashFlow = (opCf?.value != null && capEx?.value != null)
+        ? (opCf!.value - capEx!.value)
+        : null;
+
       await supabaseAdmin
         .from('financials')
         .upsert(
@@ -65,26 +107,74 @@ export async function GET(req: NextRequest) {
             revenue: rev.value,
             net_income: ni?.value ?? null,
             eps_diluted: eps?.value ?? null,
+            free_cash_flow: freeCashFlow,
           },
           { onConflict: 'period_end', ignoreDuplicates: false }
         );
     }
 
+    // 13F Institutional Holdings: fetch and parse Information Table XML
+    const filings13F = extract13FFilings(submissions);
+    if (filings13F.length > 0) {
+      const latest13F = filings13F[0];
+      try {
+        const xml = await fetch13FInfoTableXml(latest13F.accession);
+        const holdings = parse13FXml(xml);
+        for (const h of holdings) {
+          await supabaseAdmin
+            .from('institutional_holdings')
+            .upsert(
+              {
+                accession_number: latest13F.accession,
+                filed_at: new Date(latest13F.date).toISOString(),
+                institution_name: h.institutionName,
+                shares_held: h.shares,
+                value_usd: h.valueUsd,
+                pct_outstanding: h.pctOutstanding,
+                quarter_end: new Date().toISOString().split('T')[0],
+              },
+              { onConflict: 'accession_number', ignoreDuplicates: false }
+            );
+        }
+      } catch (err) {
+        console.warn(`Failed to fetch/parse 13F ${latest13F.accession}:`, err);
+      }
+    }
+
     // 8-K Events verarbeiten
     const events8K = extract8KFilings(submissions);
     for (const ev of events8K) {
-      await supabaseAdmin
-        .from('material_events')
-        .upsert(
-          {
-            accession_number: ev.accession,
-            filed_at: new Date(ev.date).toISOString(),
-            event_type: 'other',
-            description: '8-K Filing',
-            filing_url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K`,
-          },
-          { onConflict: 'accession_number', ignoreDuplicates: true }
-        );
+      try {
+        const xml = await fetch8KXml(ev.accession);
+        const { eventType, description } = parse8KXml(xml);
+        await supabaseAdmin
+          .from('material_events')
+          .upsert(
+            {
+              accession_number: ev.accession,
+              filed_at: new Date(ev.date).toISOString(),
+              event_type: eventType,
+              description: description,
+              filing_url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K`,
+            },
+            { onConflict: 'accession_number', ignoreDuplicates: true }
+          );
+      } catch (err) {
+        console.warn(`Failed to fetch/parse 8-K ${ev.accession}:`, err);
+        // Fallback: still upsert with filing date
+        await supabaseAdmin
+          .from('material_events')
+          .upsert(
+            {
+              accession_number: ev.accession,
+              filed_at: new Date(ev.date).toISOString(),
+              event_type: 'other',
+              description: '8-K Filing',
+              filing_url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K`,
+            },
+            { onConflict: 'accession_number', ignoreDuplicates: true }
+          );
+      }
     }
 
     // KI-Zusammenfassung aktualisieren
