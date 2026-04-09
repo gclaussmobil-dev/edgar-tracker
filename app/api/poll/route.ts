@@ -38,62 +38,65 @@ export async function GET(req: NextRequest) {
       getNvdaFinancials(),
     ]);
 
-    // Form 4: fetch all XMLs in parallel, then upsert in parallel
+    // Form 4: fetch in batches of 5 (parallel to SEC, sequential within batch)
     const form4Filings = extractForm4Filings(submissions);
-    const form4Results = await Promise.all(
-      form4Filings.map(async (filing) => {
-        try {
-          const xml = await fetchForm4Xml(filing.accession);
-          const parsed = parseForm4Xml(xml);
-          return { filing, parsed, error: null };
-        } catch (err) {
-          console.error(`Form 4 XML failed for ${filing.accession}:`, err);
-          return { filing, parsed: [], error: err };
-        }
-      })
-    );
-
-    // Upsert all Form 4 results in parallel
-    await Promise.all(
-      form4Results.flatMap(({ filing, parsed }) => {
-        if (parsed.length > 0) {
-          return parsed.map((tx) =>
-            supabaseAdmin.from('insider_trades').upsert(
-              {
-                accession_number: filing.accession,
-                filed_at: tx.transactionDate
-                  ? new Date(tx.transactionDate).toISOString()
-                  : new Date(filing.date).toISOString(),
-                person_name: tx.ownerName,
-                role: 'Insider',
-                transaction_code: tx.transactionCode,
-                shares: tx.shares,
-                price_per_share: tx.pricePerShare,
-                total_value: tx.shares * tx.pricePerShare,
-                shares_owned_after: tx.sharesOwnedAfter,
-                direct_indirect: tx.directIndirect,
-              },
-              { onConflict: 'accession_number', ignoreDuplicates: false }
-            )
-          );
-        } else {
-          // Fallback: preserve filing timestamp
-          return [
-            supabaseAdmin.from('insider_trades').upsert(
-              {
-                accession_number: filing.accession,
-                filed_at: new Date(filing.date).toISOString(),
-                person_name: 'Pending Parse',
-                role: 'Unknown',
-                transaction_code: 'S',
-                shares: 0,
-              },
-              { onConflict: 'accession_number', ignoreDuplicates: false }
-            ),
-          ];
-        }
-      })
-    );
+    const form4Results: { filing: any; parsed: any[] }[] = [];
+    for (let i = 0; i < form4Filings.length; i += 5) {
+      const batch = form4Filings.slice(i, i + 5);
+      const batchResults = await Promise.all(
+        batch.map(async (filing) => {
+          try {
+            const xml = await fetchForm4Xml(filing.accession);
+            const parsed = parseForm4Xml(xml);
+            return { filing, parsed };
+          } catch (err) {
+            console.error(`Form 4 XML failed for ${filing.accession}:`, err);
+            return { filing, parsed: [] };
+          }
+        })
+      );
+      form4Results.push(...batchResults);
+      // Upsert batch immediately to avoid holding all promises
+      await Promise.all(
+        batchResults.flatMap(({ filing, parsed }) => {
+          if (parsed.length > 0) {
+            return parsed.map((tx) =>
+              supabaseAdmin.from('insider_trades').upsert(
+                {
+                  accession_number: filing.accession,
+                  filed_at: tx.transactionDate
+                    ? new Date(tx.transactionDate).toISOString()
+                    : new Date(filing.date).toISOString(),
+                  person_name: tx.ownerName,
+                  role: 'Insider',
+                  transaction_code: tx.transactionCode,
+                  shares: tx.shares,
+                  price_per_share: tx.pricePerShare,
+                  total_value: tx.shares * tx.pricePerShare,
+                  shares_owned_after: tx.sharesOwnedAfter,
+                  direct_indirect: tx.directIndirect,
+                },
+                { onConflict: 'accession_number', ignoreDuplicates: false }
+              )
+            );
+          } else {
+            return [
+              supabaseAdmin.from('insider_trades').upsert(
+                {
+                  accession_number: filing.accession,
+                  filed_at: new Date(filing.date).toISOString(),
+                  person_name: 'Pending Parse',
+                  role: 'Unknown',
+                  transaction_code: 'S',
+                  shares: 0,
+                },
+                { onConflict: 'accession_number', ignoreDuplicates: false }
+              ),
+            ];
+          }
+        })
+      );
+    }
 
     // XBRL Finanzdaten verarbeiten
     const revenues = extractRevenue(facts);
