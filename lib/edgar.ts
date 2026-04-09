@@ -390,48 +390,51 @@ export function parse13FXml(xml: string): {
   }).filter(e => e.shares > 0);
 }
 
-// Fetch 8-K document — .txt raw submission is most reliable
+// Fetch 8-K document — .htm inline XBRL has shallow nesting; .txt can be deeply nested
 export async function fetch8KXml(accession: string): Promise<string> {
   const folder = accessionToFolder(accession);
   const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${folder}`;
 
-  // Try .txt raw submission first (confirmed present for all 8-K filings)
-  const txtRes = await edgarFetch(`${baseUrl}/${accession}.txt`);
-  if (txtRes.ok) return txtRes.text();
-
-  // Fallback: .htm (confirmed present; naming: nvda-YYYYMMDD.htm)
+  // Try .htm first (inline XBRL with shallow nesting — safe for fast-xml-parser)
   const htmRes = await edgarFetch(`${baseUrl}.htm`);
   if (htmRes.ok) return htmRes.text();
 
-  // Fallback: primary_doc.xml
+  // Fallback: primary_doc.xml (often a flat XBRL document)
   const xmlRes = await edgarFetch(`${baseUrl}/primary_doc.xml`);
   if (xmlRes.ok) return xmlRes.text();
+
+  // Last resort: .txt (deeply nested, may exceed parser limits)
+  const txtRes = await edgarFetch(`${baseUrl}/${accession}.txt`);
+  if (txtRes.ok) return txtRes.text();
 
   throw new Error(`Could not find 8-K document for accession ${accession}`);
 }
 
 // Parse 8-K inline XBRL HTML (or plain XML) into eventType and description
+// Falls back to regex when XML parse fails (e.g. Maximum nested tags exceeded)
 export function parse8KXml(xml: string): {
   eventType: string;
   description: string;
 } {
-  // Attempt XML parse (for plain XML documents)
-  const parsed = xmlParser.parse(xml);
-  const doc = parsed['document'] ?? parsed;
+  let docType = '8-K';
+  let periodEnd = '';
 
-  const eventType =
-    doc['documentType'] ??
-    doc['document-type'] ??
-    doc['form'] ??
-    '8-K';
+  try {
+    const parsed = xmlParser.parse(xml);
+    const doc = parsed['document'] ?? parsed;
+    docType = doc['documentType'] ?? doc['document-type'] ?? doc['form'] ?? '8-K';
+    periodEnd = doc['periodOfReport'] ?? doc['documentPeriodEndDate'] ?? '';
+  } catch {
+    // XML parse failed — use regex on raw text for inline XBRL HTML
+  }
 
-  // For inline XBRL HTML, extract dei: fields from raw HTML
+  // Extract dei: fields from inline XBRL HTML
   const docTypeMatch = /name=["']dei:DocumentType["'][^>]*>([^<]+)</.exec(xml);
   const periodMatch = /name=["']dei:DocumentPeriodEndDate["'][^>]*>([^<]+)</.exec(xml);
-  const extractedType = docTypeMatch ? docTypeMatch[1].trim() : null;
-  const extractedPeriod = periodMatch ? periodMatch[1].trim() : null;
+  if (docTypeMatch) docType = docTypeMatch[1].trim();
+  if (periodMatch) periodEnd = periodMatch[1].trim();
 
-  // Extract Item numbers and descriptions from HTML headings
+  // Extract Item numbers and descriptions from HTML/text
   const itemPattern = /(?:Item|ITEM)\s+(\d+\.\d+|\d+[A-Z]?)\s*[:\-]?\s*([^<\n]{5,200})/gi;
   const items: string[] = [];
   let match;
@@ -441,11 +444,10 @@ export function parse8KXml(xml: string): {
     if (itemDesc) items.push(`Item ${itemNum}: ${itemDesc}`);
   }
 
-  const typeStr = extractedType ?? String(eventType);
-  const periodStr = extractedPeriod ? ` (${extractedPeriod})` : '';
+  const periodStr = periodEnd ? ` (${periodEnd})` : '';
   const description = items.length > 0
     ? items.slice(0, 3).join('; ') + periodStr
-    : `${typeStr}${periodStr}`;
+    : `${docType}${periodStr}`;
 
-  return { eventType: typeStr, description };
+  return { eventType: docType, description };
 }

@@ -44,14 +44,16 @@ export async function GET(req: NextRequest) {
       try {
         const xml = await fetchForm4Xml(filing.accession);
         const parsed = parseForm4Xml(xml);
-        console.log(`Form 4 ${filing.accession}: parsed ${parsed.length} transactions, first=${parsed[0]?.ownerName} shares=${parsed[0]?.shares}`);
+        console.log(`Form 4 ${filing.accession}: parsed=${parsed.length} firstOwner=${parsed[0]?.ownerName} firstShares=${parsed[0]?.shares} firstDate=${parsed[0]?.transactionDate} firstPrice=${parsed[0]?.pricePerShare}`);
         for (const tx of parsed) {
           await supabaseAdmin
             .from('insider_trades')
             .upsert(
               {
                 accession_number: filing.accession,
-                filed_at: new Date(tx.transactionDate).toISOString(),
+                filed_at: tx.transactionDate
+                  ? new Date(tx.transactionDate).toISOString()
+                  : new Date(filing.date).toISOString(),
                 person_name: tx.ownerName,
                 role: 'Insider',
                 transaction_code: tx.transactionCode,
