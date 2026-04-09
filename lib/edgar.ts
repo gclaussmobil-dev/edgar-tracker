@@ -142,14 +142,15 @@ export function extract13DGFilings(submissions: any) {
 export async function fetchForm4Xml(accession: string): Promise<string> {
   const accessionNoDashes = accession.replace(/-/g, '');
   const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}`;
+
+  // Try primary_doc.xml first (the actual raw XML, always available for Form 4)
+  // Falls back through stylesheet-transformed HTML then generic names
   const docNames = [
-    // Stylesheet-transformed HTML (what primaryDocument actually points to — these return HTML)
+    'primary_doc.xml',
     'xslF345X06/wk-form4.xml',
+    'xslF345X06/wk-form4_1774386816.xml',
     'xslF345X05/wk-form4.xml',
     'xslF345X04/wk-form4.xml',
-    // Try the .txt raw submission file (full text, always available)
-    '.txt',
-    // Fallback generic names
     'ownership.xml',
     'form4.xml',
     'data.xml',
@@ -262,14 +263,17 @@ export function parseForm4Xml(xml: string): {
 // Fetch 13F-HR Information Table XML
 export async function fetch13FInfoTableXml(accession: string): Promise<string> {
   const accessionNoDashes = accession.replace(/-/g, '');
+  // Raw submission .txt file — always available
+  const txtUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}/${accession}.txt`;
+  const txtRes = await edgarFetch(txtUrl);
+  if (txtRes.ok) return txtRes.text();
+
+  // Plain XML information table (correct for recent filings)
   const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}`;
   const docNames = [
-    // Plain XML — correct for recent filings; stylesheet path primaryDocument points to HTML
     'information_table.xml',
-    // Stylesheet subdirectory (for older/other patterns)
     'xslForm13F_X02/information_table.xml',
     'xslForm13F_X01/information_table.xml',
-    // Legacy / generic names
     'informdoc.xml',
     'Data.xml',
     '13f-info.xml',
@@ -337,13 +341,15 @@ export function parse13FXml(xml: string): {
 // Fetch 8-K XML by trying multiple common document names
 export async function fetch8KXml(accession: string): Promise<string> {
   const accessionNoDashes = accession.replace(/-/g, '');
+  // Raw submission .txt file — always available
+  const txtUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}/${accession}.txt`;
+  const txtRes = await edgarFetch(txtUrl);
+  if (txtRes.ok) return txtRes.text();
+
+  // Fallback: try stylesheet HTML documents (8-K filings are often .htm files)
   const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}`;
   const docNames = [
-    // Try .txt raw submission (full EDGAR text, always available and parseable)
-    '.txt',
-    // 8-K filings are often HTML .htm files (e.g., nvda-20260302.htm)
     '.htm',
-    // Legacy XML names
     'form8k.xml',
     'data.xml',
     'xslForm8K.xml',
