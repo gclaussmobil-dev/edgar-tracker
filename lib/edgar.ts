@@ -364,17 +364,14 @@ export function parse13FXml(xml: string): {
       entry['issuerName'] ??
       'Unknown Institution'
     );
-    const valueTag = entry['value'] ?? entry['marketValue'] ?? {};
-    // SEC 13F: value is reported in dollars (not thousands) for inline XBRL filings
-    const valueUsd = parseFloat(String(valueTag)) || 0;
+    // value can be a string, number, or { '#text': string } object
+    const rawValue = entry['value'] ?? entry['marketValue'] ?? {};
+    const valueStr = typeof rawValue === 'object' ? (rawValue['#text'] ?? JSON.stringify(rawValue)) : String(rawValue);
+    const valueUsd = parseFloat(valueStr) || 0;
 
     const shrsTag = entry['shrsOrPrnAmt'] ?? entry['sharesOrPrincipalAmount'] ?? {};
-    const shares = parseInt(
-      shrsTag['sshPrnamt'] ??
-      shrsTag['shares'] ??
-      shrsTag['value'] ??
-      '0'
-    ) || 0;
+    const rawShares = shrsTag['sshPrnamt'] ?? shrsTag['shares'] ?? shrsTag['value'] ?? '0';
+    const shares = parseInt(typeof rawShares === 'object' ? (rawShares['#text'] ?? '0') : String(rawShares)) || 0;
 
     const votingTag = entry['votingAuthority'] ?? entry['voting-authority'] ?? {};
     const soleVoting = parseInt(
