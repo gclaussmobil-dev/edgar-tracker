@@ -60,12 +60,13 @@ export async function GET(req: NextRequest) {
                 shares_owned_after: tx.sharesOwnedAfter,
                 direct_indirect: tx.directIndirect,
               },
-              { onConflict: 'accession_number', ignoreDuplicates: true }
+              { onConflict: 'accession_number', ignoreDuplicates: false }
             );
         }
       } catch (err) {
-        console.warn(`Failed to fetch/parse Form 4 ${filing.accession}:`, err);
-        // Fallback: upsert with minimal data so we at least have the filing record
+        console.error(`Form 4 XML failed for ${filing.accession}:`, err);
+        // Fallback: upsert with placeholder so filing timestamp is preserved;
+        // ignoreDuplicates: false ensures this can be overwritten once parsing is fixed
         await supabaseAdmin
           .from('insider_trades')
           .upsert(
@@ -77,7 +78,7 @@ export async function GET(req: NextRequest) {
               transaction_code: 'S',
               shares: 0,
             },
-            { onConflict: 'accession_number', ignoreDuplicates: true }
+            { onConflict: 'accession_number', ignoreDuplicates: false }
           );
       }
     }
@@ -137,7 +138,7 @@ export async function GET(req: NextRequest) {
             );
         }
       } catch (err) {
-        console.warn(`Failed to fetch/parse 13F ${latest13F.accession}:`, err);
+        console.error(`Failed to fetch/parse 13F ${latest13F.accession}:`, err);
       }
     }
 
@@ -157,11 +158,12 @@ export async function GET(req: NextRequest) {
               description: description,
               filing_url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K`,
             },
-            { onConflict: 'accession_number', ignoreDuplicates: true }
+            { onConflict: 'accession_number', ignoreDuplicates: false }
           );
       } catch (err) {
-        console.warn(`Failed to fetch/parse 8-K ${ev.accession}:`, err);
-        // Fallback: still upsert with filing date
+        console.error(`Failed to fetch/parse 8-K ${ev.accession}:`, err);
+        // Fallback: preserve filing timestamp; ignoreDuplicates: false so real data
+        // can overwrite this placeholder once parsing is fixed
         await supabaseAdmin
           .from('material_events')
           .upsert(
@@ -172,7 +174,7 @@ export async function GET(req: NextRequest) {
               description: '8-K Filing',
               filing_url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001045810&type=8-K`,
             },
-            { onConflict: 'accession_number', ignoreDuplicates: true }
+            { onConflict: 'accession_number', ignoreDuplicates: false }
           );
       }
     }
