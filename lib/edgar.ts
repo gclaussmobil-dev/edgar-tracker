@@ -142,10 +142,17 @@ export function extract13DGFilings(submissions: any) {
     .slice(0, 10);
 }
 
+// Accession format: 0001199039-26-000003 → folder: 000119903926000003
+// CIK must be 10-digit zero-padded (parseInt strips leading zeros)
+function accessionToFolder(accession: string): string {
+  const parts = accession.split('-');
+  return parts[0] + parts[1] + parts[2]; // cik(10) + year(2) + seq(6)
+}
+
 // Fetch Form 4 XML by trying multiple common document names
 export async function fetchForm4Xml(accession: string): Promise<string> {
-  const accessionNoDashes = accession.replace(/-/g, '');
-  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}`;
+  const folder = accessionToFolder(accession);
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${NVDA_CIK}/${folder}`;
 
   // Try primary_doc.xml first (the actual raw XML, always available for Form 4)
   // Falls back through stylesheet-transformed HTML then generic names
@@ -315,15 +322,9 @@ export function parseForm4Xml(xml: string): {
 }
 
 // Fetch 13F-HR Information Table XML
-// Accession format: 0001045810-26-000011 → folder path: 000104581026000011
-// (CIK 10 digits + year 2 digits + sequence 6 digits, no dashes)
 export async function fetch13FInfoTableXml(accession: string): Promise<string> {
-  const parts = accession.split('-');
-  const cikPart = parts[0];          // '0001045810'
-  const yearPart = parts[1];         // '26'
-  const seqPart = parts[2];          // '000011'
-  const folder = cikPart + yearPart + seqPart; // '000104581026000011'
-  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${folder}`;
+  const folder = accessionToFolder(accession);
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${NVDA_CIK}/${folder}`;
 
   // Try primary_doc.xml first (confirmed present on SEC index page)
   const primaryDoc = await edgarFetch(`${baseUrl}/primary_doc.xml`);
@@ -389,14 +390,9 @@ export function parse13FXml(xml: string): {
 }
 
 // Fetch 8-K document (HTML or XML)
-// Accession format: 0001045810-26-000024 → folder path: 000104581026000024
 export async function fetch8KXml(accession: string): Promise<string> {
-  const parts = accession.split('-');
-  const cikPart = parts[0];
-  const yearPart = parts[1];
-  const seqPart = parts[2];
-  const folder = cikPart + yearPart + seqPart;
-  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${folder}`;
+  const folder = accessionToFolder(accession);
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${NVDA_CIK}/${folder}`;
 
   // Try .htm first (confirmed present; naming pattern: nvda-YYYYMMDD.htm)
   const htmRes = await edgarFetch(`${baseUrl}.htm`);
