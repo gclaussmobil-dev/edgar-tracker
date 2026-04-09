@@ -143,23 +143,24 @@ export function extract13DGFilings(submissions: any) {
 }
 
 // Accession format: 0001199039-26-000003 → folder: 000119903926000003
-// CIK must be 10-digit zero-padded (parseInt strips leading zeros)
 function accessionToFolder(accession: string): string {
   const parts = accession.split('-');
   return parts[0] + parts[1] + parts[2]; // cik(10) + year(2) + seq(6)
 }
 
-// Fetch Form 4 XML by trying multiple common document names
+// Fetch Form 4 XML — .txt raw submission is most reliable
 export async function fetchForm4Xml(accession: string): Promise<string> {
   const folder = accessionToFolder(accession);
-  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${NVDA_CIK}/${folder}`;
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${folder}`;
 
-  // Try primary_doc.xml first (the actual raw XML, always available for Form 4)
-  // Falls back through stylesheet-transformed HTML then generic names
+  // Try .txt raw submission first (confirmed present for all Form 4 filings)
+  const txtRes = await edgarFetch(`${baseUrl}/${accession}.txt`);
+  if (txtRes.ok) return txtRes.text();
+
+  // Fallback: try stylesheet-transformed XML with known naming pattern
   const docNames = [
     'primary_doc.xml',
     'xslF345X06/wk-form4.xml',
-    'xslF345X06/wk-form4_1774386816.xml',
     'xslF345X05/wk-form4.xml',
     'xslF345X04/wk-form4.xml',
     'ownership.xml',
@@ -324,7 +325,7 @@ export function parseForm4Xml(xml: string): {
 // Fetch 13F-HR Information Table XML
 export async function fetch13FInfoTableXml(accession: string): Promise<string> {
   const folder = accessionToFolder(accession);
-  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${NVDA_CIK}/${folder}`;
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${folder}`;
 
   // Try primary_doc.xml first (confirmed present on SEC index page)
   const primaryDoc = await edgarFetch(`${baseUrl}/primary_doc.xml`);
@@ -389,16 +390,20 @@ export function parse13FXml(xml: string): {
   }).filter(e => e.shares > 0);
 }
 
-// Fetch 8-K document (HTML or XML)
+// Fetch 8-K document — .txt raw submission is most reliable
 export async function fetch8KXml(accession: string): Promise<string> {
   const folder = accessionToFolder(accession);
-  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${NVDA_CIK}/${folder}`;
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${folder}`;
 
-  // Try .htm first (confirmed present; naming pattern: nvda-YYYYMMDD.htm)
+  // Try .txt raw submission first (confirmed present for all 8-K filings)
+  const txtRes = await edgarFetch(`${baseUrl}/${accession}.txt`);
+  if (txtRes.ok) return txtRes.text();
+
+  // Fallback: .htm (confirmed present; naming: nvda-YYYYMMDD.htm)
   const htmRes = await edgarFetch(`${baseUrl}.htm`);
   if (htmRes.ok) return htmRes.text();
 
-  // Try primary_doc.xml
+  // Fallback: primary_doc.xml
   const xmlRes = await edgarFetch(`${baseUrl}/primary_doc.xml`);
   if (xmlRes.ok) return xmlRes.text();
 
