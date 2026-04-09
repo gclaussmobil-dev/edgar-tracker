@@ -38,11 +38,11 @@ export async function GET(req: NextRequest) {
       getNvdaFinancials(),
     ]);
 
-    // Form 4: fetch in batches of 5 (parallel to SEC, sequential within batch)
+    // Form 4: fetch in batches of 3 (batches of 5 exceeded 30s Lambda limit)
     const form4Filings = extractForm4Filings(submissions);
     const form4Results: { filing: any; parsed: any[] }[] = [];
-    for (let i = 0; i < form4Filings.length; i += 5) {
-      const batch = form4Filings.slice(i, i + 5);
+    for (let i = 0; i < form4Filings.length; i += 3) {
+      const batch = form4Filings.slice(i, i + 3);
       const batchResults = await Promise.all(
         batch.map(async (filing) => {
           try {
