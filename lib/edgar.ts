@@ -57,6 +57,28 @@ export function extractEPS(facts: any): { period: string; value: number }[] {
     .slice(0, 8);
 }
 
+// Extrahiert Operating Cash Flow aus XBRL
+export function extractOperatingCashFlow(facts: any): { period: string; value: number }[] {
+  const items =
+    facts?.facts?.['us-gaap']?.NetCashProvidedByUsedInOperatingActivities?.units?.USD ?? [];
+  return items
+    .filter((r: any) => r.form === '10-Q' || r.form === '10-K')
+    .map((r: any) => ({ period: r.end, value: r.val }))
+    .sort((a: any, b: any) => b.period.localeCompare(a.period))
+    .slice(0, 8);
+}
+
+// Extrahiert Capital Expenditures aus XBRL
+export function extractCapitalExpenditures(facts: any): { period: string; value: number }[] {
+  const items =
+    facts?.facts?.['us-gaap']?.PaymentsToAcquirePropertyPlantAndEquipment?.units?.USD ?? [];
+  return items
+    .filter((r: any) => r.form === '10-Q' || r.form === '10-K')
+    .map((r: any) => ({ period: r.end, value: r.val }))
+    .sort((a: any, b: any) => b.period.localeCompare(a.period))
+    .slice(0, 8);
+}
+
 // Parst Form 4 Filings aus Submissions JSON
 export function extractForm4Filings(submissions: any) {
   const recent = submissions?.filings?.recent ?? {};
