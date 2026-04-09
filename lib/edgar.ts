@@ -1,7 +1,13 @@
 // lib/edgar.ts
+import { XMLParser } from 'fast-xml-parser';
 
 const NVDA_CIK = '0001045810';
 const USER_AGENT = process.env.EDGAR_USER_AGENT!;
+
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+});
 
 const edgarFetch = (url: string) =>
   fetch(url, { headers: { 'User-Agent': USER_AGENT } });
@@ -130,4 +136,178 @@ export function extract13DGFilings(submissions: any) {
     .map((form, i) => ({ form, date: dates[i], accession: accessions[i] }))
     .filter((f) => ['SC 13D', 'SC 13G', 'SC 13D/A', 'SC 13G/A'].includes(f.form))
     .slice(0, 10);
+}
+
+// Fetch Form 4 XML by trying multiple common document names
+export async function fetchForm4Xml(accession: string): Promise<string> {
+  const accessionNoDashes = accession.replace(/-/g, '');
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}`;
+  const docNames = ['xslF345X04 ownership.xml', 'ownership.xml', 'form4.xml', 'data.xml'];
+  for (const doc of docNames) {
+    const url = `${baseUrl}/${doc}`;
+    const res = await edgarFetch(url);
+    if (res.ok) return res.text();
+  }
+  throw new Error(`Could not find Form 4 XML for accession ${accession}`);
+}
+
+// Parse Form 4 XML into structured transaction records
+export function parseForm4Xml(xml: string): {
+  ownerName: string;
+  transactionCode: string;
+  shares: number;
+  pricePerShare: number;
+  sharesOwnedAfter: number;
+  directIndirect: string;
+  transactionDate: string;
+}[] {
+  const parsed = xmlParser.parse(xml);
+  const document = parsed['ownership-document'] ?? parsed;
+
+  const getField = (obj: any, path: string): any => {
+    return path.split('.').reduce((o, k) => (o != null ? o[k] : undefined), obj);
+  };
+
+  const results: {
+    ownerName: string;
+    transactionCode: string;
+    shares: number;
+    pricePerShare: number;
+    sharesOwnedAfter: number;
+    directIndirect: string;
+    transactionDate: string;
+  }[] = [];
+
+  const ownerData = document['reporting-owner'] ?? document['reportingOwner'] ?? {};
+  const ownerName =
+    getField(ownerData, 'owner-name') ??
+    getField(ownerData, 'rptOwnerName') ??
+    getField(ownerData, 'reportingPerson.ownerName') ??
+    'Unknown';
+
+  const table = document['non-derivative-table'] ?? document['nonDerivativeTable'] ?? {};
+  const transactions: any[] = Array.isArray(table['non-derivative-transaction'])
+    ? table['non-derivative-transaction']
+    : table['nonDerivativeTransaction']
+      ? [table['nonDerivativeTransaction']]
+      : [];
+
+  for (const tx of transactions) {
+    const amounts = tx['transaction-amounts'] ?? tx['transactionAmounts'] ?? {};
+    const postTx = tx['post-transaction-amounts'] ?? tx['postTransactionAmounts'] ?? {};
+    const ownership = tx['ownership-nature'] ?? tx['ownershipNature'] ?? {};
+
+    const shares = parseInt(
+      getField(amounts, 'transaction-shares.value') ??
+      getField(amounts, 'transactionShares.value') ??
+      '0'
+    ) || 0;
+
+    const priceRaw =
+      getField(amounts, 'transaction-price-per-share.value') ??
+      getField(amounts, 'transactionPricePerShare.value') ??
+      '0';
+    const pricePerShare = parseFloat(priceRaw) || 0;
+
+    const sharesAfterRaw =
+      getField(postTx, 'shares-owned-following-transaction.value') ??
+      getField(postTx, 'sharesOwnedFollowingTransaction.value') ??
+      '0';
+    const sharesOwnedAfter = parseInt(sharesAfterRaw) || 0;
+
+    const txCode =
+      getField(amounts, 'transaction-code') ??
+      getField(amounts, 'transactionCode') ??
+      'S';
+
+    const directIndirect =
+      getField(ownership, 'direct-or-indirect-ownership.value') ??
+      getField(ownership, 'directOrIndirectOwnership.value') ??
+      getField(ownership, 'directIndirect.value') ??
+      'D';
+
+    const txDate =
+      getField(tx, 'transaction-date') ??
+      getField(tx, 'transactionDate') ??
+      {};
+    const transactionDate =
+      getField(txDate, 'value') ??
+      '';
+
+    results.push({
+      ownerName: String(ownerName),
+      transactionCode: String(txCode),
+      shares,
+      pricePerShare,
+      sharesOwnedAfter,
+      directIndirect: String(directIndirect).charAt(0),
+      transactionDate: String(transactionDate),
+    });
+  }
+
+  return results;
+}
+
+// Fetch 13F-HR Information Table XML
+export async function fetch13FInfoTableXml(accession: string): Promise<string> {
+  const accessionNoDashes = accession.replace(/-/g, '');
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}`;
+  const docNames = ['informdoc.xml', 'Data.xml', '13f-info.xml', 'information-table.xml'];
+  for (const doc of docNames) {
+    const url = `${baseUrl}/${doc}`;
+    const res = await edgarFetch(url);
+    if (res.ok) return res.text();
+  }
+  throw new Error(`Could not find 13F Information Table for accession ${accession}`);
+}
+
+// Parse 13F Information Table XML
+export function parse13FXml(xml: string): {
+  institutionName: string;
+  shares: number;
+  valueUsd: number;
+  pctOutstanding: number;
+  soleVoting: number;
+}[] {
+  const parsed = xmlParser.parse(xml);
+  const infoTable = parsed['informationTable'] ?? parsed;
+  const entries: any[] = Array.isArray(infoTable['infoTable'])
+    ? infoTable['infoTable']
+    : infoTable['infoTable']
+      ? [infoTable['infoTable']]
+      : [];
+
+  // NVIDIA shares outstanding ≈ 24.5B
+  const NVDA_SHARES_OUTSTANDING = 24_500_000_000;
+
+  return entries.map((entry) => {
+    const name = String(
+      entry['nameOfIssuer'] ??
+      entry['name-of-issuer'] ??
+      entry['issuerName'] ??
+      'Unknown Institution'
+    );
+    const valueTag = entry['value'] ?? entry['marketValue'] ?? {};
+    const valueUsd = (parseFloat(valueTag) || 0) * 1000; // filed in thousands
+
+    const shrsTag = entry['shrsOrPrnAmt'] ?? entry['sharesOrPrincipalAmount'] ?? {};
+    const shares = parseInt(
+      shrsTag['sshPrnamt'] ??
+      shrsTag['shares'] ??
+      shrsTag['value'] ??
+      '0'
+    ) || 0;
+
+    const votingTag = entry['votingAuthority'] ?? entry['voting-authority'] ?? {};
+    const soleVoting = parseInt(
+      votingTag['sole'] ??
+      votingTag['Sole'] ??
+      votingTag['votingAuthoritySole'] ??
+      '0'
+    ) || 0;
+
+    const pctOutstanding = shares / NVDA_SHARES_OUTSTANDING;
+
+    return { institutionName: name, shares, valueUsd, pctOutstanding, soleVoting };
+  }).filter(e => e.shares > 0);
 }
