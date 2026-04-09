@@ -311,3 +311,56 @@ export function parse13FXml(xml: string): {
     return { institutionName: name, shares, valueUsd, pctOutstanding, soleVoting };
   }).filter(e => e.shares > 0);
 }
+
+// Fetch 8-K XML by trying multiple common document names
+export async function fetch8KXml(accession: string): Promise<string> {
+  const accessionNoDashes = accession.replace(/-/g, '');
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}`;
+  const docNames = ['form8k.xml', 'data.xml', 'xslForm8K.xml', 'FilingSummary.xml'];
+  for (const doc of docNames) {
+    const url = `${baseUrl}/${doc}`;
+    const res = await edgarFetch(url);
+    if (res.ok) return res.text();
+  }
+  throw new Error(`Could not find 8-K XML for accession ${accession}`);
+}
+
+// Parse 8-K XML into eventType and description
+export function parse8KXml(xml: string): {
+  eventType: string;
+  description: string;
+} {
+  const parsed = xmlParser.parse(xml);
+  const doc = parsed['document'] ?? parsed;
+
+  const eventType =
+    doc['documentType'] ??
+    doc['document-type'] ??
+    doc['form'] ??
+    '8-K';
+
+  const extractText = (obj: any): string => {
+    if (typeof obj === 'string') return obj;
+    if (Array.isArray(obj)) return obj.map(extractText).join(' ');
+    if (obj && typeof obj === 'object') {
+      const vals = Object.values(obj);
+      return vals.map(extractText).join(' ');
+    }
+    return '';
+  };
+
+  const rawText = extractText(doc);
+
+  const itemPattern = /(?:Item|ITEM)\s+(\d+\.\d+|\d+[A-Z]?)\s*[:\-]?\s*([A-Z][^<\n]{0,200})/gi;
+  const items: string[] = [];
+  let match;
+  while ((match = itemPattern.exec(rawText)) !== null) {
+    items.push(`Item ${match[1]}: ${match[2].trim()}`);
+  }
+
+  const description = items.length > 0
+    ? items.slice(0, 3).join('; ')
+    : '8-K Filing';
+
+  return { eventType: String(eventType), description };
+}
