@@ -209,6 +209,7 @@ export function parseForm4Xml(xml: string): {
 
   const ownerData = document['reporting-owner'] ?? document['reportingOwner'] ?? {};
   const ownerName =
+    getField(ownerData, 'reportingOwnerId.rptOwnerName') ??
     getField(ownerData, 'owner-name') ??
     getField(ownerData, 'rptOwnerName') ??
     getField(ownerData, 'reportingPerson.ownerName') ??
