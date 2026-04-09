@@ -190,7 +190,8 @@ export function parseForm4Xml(xml: string): {
 
   // Attempt fast-xml-parser on the extracted XML block
   const parsed = xmlParser.parse(xmlBlock);
-  const document = parsed['ownership-document'] ?? parsed;
+  // fast-xml-parser preserves exact tag names; SEC Form 4 uses camelCase keys
+  const document = parsed['ownershipDocument'] ?? parsed;
 
   const getField = (obj: any, path: string): any => {
     return path.split('.').reduce((o, k) => (o != null ? o[k] : undefined), obj);
