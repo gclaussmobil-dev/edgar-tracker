@@ -327,13 +327,13 @@ export async function fetch13FInfoTableXml(accession: string): Promise<string> {
   const folder = accessionToFolder(accession);
   const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${folder}`;
 
-  // Try primary_doc.xml first (confirmed present on SEC index page)
-  const primaryDoc = await edgarFetch(`${baseUrl}/primary_doc.xml`);
-  if (primaryDoc.ok) return primaryDoc.text();
-
-  // Then information_table.xml
+  // Try information_table.xml first (contains actual holdings data)
   const infoTable = await edgarFetch(`${baseUrl}/information_table.xml`);
   if (infoTable.ok) return infoTable.text();
+
+  // Fallback: primary_doc.xml (contains metadata, not holdings)
+  const primaryDoc = await edgarFetch(`${baseUrl}/primary_doc.xml`);
+  if (primaryDoc.ok) return primaryDoc.text();
 
   throw new Error(`Could not find 13F Information Table for accession ${accession}`);
 }
