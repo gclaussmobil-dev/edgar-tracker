@@ -177,6 +177,7 @@ export function parseForm4Xml(xml: string): {
   directIndirect: string;
   transactionDate: string;
 }[] {
+  // Attempt fast-xml-parser first
   const parsed = xmlParser.parse(xml);
   const document = parsed['ownership-document'] ?? parsed;
 
@@ -261,33 +262,64 @@ export function parseForm4Xml(xml: string): {
     });
   }
 
+  // Fallback: if XML parse produced no transactions, use regex on raw txt content.
+  // This handles .txt submissions where fast-xml-parser cannot parse the embedded XML.
+  if (results.length === 0) {
+    const ownerNameMatch = /<rptOwnerName>([^<]+)<\/rptOwnerName>/.exec(xml);
+    const name = ownerNameMatch ? ownerNameMatch[1].trim() : 'Unknown';
+
+    const txBlocks = xml.split(/<nonDerivativeTransaction>/i).slice(1);
+    for (const block of txBlocks) {
+      const sharesMatch = /<transactionShares>\s*<value>(\d+)<\/value>/.exec(block);
+      const priceMatch = /<transactionPricePerShare>\s*<value>([\d.]+)<\/value>/.exec(block);
+      const sharesAfterMatch = /<sharesOwnedFollowingTransaction>\s*<value>(\d+)<\/value>/.exec(block);
+      const codeMatch = /<transactionCode>([A-Z])<[^<]*<\/transactionCode>/.exec(block);
+      const directMatch = /<directOrIndirectOwnership>\s*<value>([DI])\s*<\/value>/.exec(block);
+      const dateMatch = /<transactionDate>\s*<value>(\d{4}-\d{2}-\d{2})<\/value>/.exec(block);
+
+      const shares = sharesMatch ? parseInt(sharesMatch[1]) || 0 : 0;
+      const pricePerShare = priceMatch ? parseFloat(priceMatch[1]) || 0 : 0;
+      const sharesOwnedAfter = sharesAfterMatch ? parseInt(sharesAfterMatch[1]) || 0 : 0;
+      const transactionCode = codeMatch ? codeMatch[1] : 'S';
+      const directIndirect = directMatch ? directMatch[1] : 'D';
+      const transactionDate = dateMatch ? dateMatch[1] : '';
+
+      if (shares > 0 || pricePerShare > 0) {
+        results.push({
+          ownerName: name,
+          transactionCode,
+          shares,
+          pricePerShare,
+          sharesOwnedAfter,
+          directIndirect,
+          transactionDate,
+        });
+      }
+    }
+  }
+
   return results;
 }
 
 // Fetch 13F-HR Information Table XML
+// Accession format: 0001045810-26-000011 → folder path: 000104581026000011
+// (CIK 10 digits + year 2 digits + sequence 6 digits, no dashes)
 export async function fetch13FInfoTableXml(accession: string): Promise<string> {
-  const accessionNoDashes = accession.replace(/-/g, '');
-  // Raw submission .txt file — always available
-  const txtUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}/${accession}.txt`;
-  const txtRes = await edgarFetch(txtUrl);
-  if (txtRes.ok) return txtRes.text();
+  const parts = accession.split('-');
+  const cikPart = parts[0];          // '0001045810'
+  const yearPart = parts[1];         // '26'
+  const seqPart = parts[2];          // '000011'
+  const folder = cikPart + yearPart + seqPart; // '000104581026000011'
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${folder}`;
 
-  // Plain XML information table (correct for recent filings)
-  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}`;
-  const docNames = [
-    'information_table.xml',
-    'xslForm13F_X02/information_table.xml',
-    'xslForm13F_X01/information_table.xml',
-    'informdoc.xml',
-    'Data.xml',
-    '13f-info.xml',
-    'information-table.xml',
-  ];
-  for (const doc of docNames) {
-    const url = `${baseUrl}/${doc}`;
-    const res = await edgarFetch(url);
-    if (res.ok) return res.text();
-  }
+  // Try primary_doc.xml first (confirmed present on SEC index page)
+  const primaryDoc = await edgarFetch(`${baseUrl}/primary_doc.xml`);
+  if (primaryDoc.ok) return primaryDoc.text();
+
+  // Then information_table.xml
+  const infoTable = await edgarFetch(`${baseUrl}/information_table.xml`);
+  if (infoTable.ok) return infoTable.text();
+
   throw new Error(`Could not find 13F Information Table for accession ${accession}`);
 }
 
@@ -318,7 +350,8 @@ export function parse13FXml(xml: string): {
       'Unknown Institution'
     );
     const valueTag = entry['value'] ?? entry['marketValue'] ?? {};
-    const valueUsd = (parseFloat(valueTag) || 0) * 1000; // filed in thousands
+    // SEC 13F: value is reported in dollars (not thousands) for inline XBRL filings
+    const valueUsd = parseFloat(String(valueTag)) || 0;
 
     const shrsTag = entry['shrsOrPrnAmt'] ?? entry['sharesOrPrincipalAmount'] ?? {};
     const shares = parseInt(
@@ -342,36 +375,33 @@ export function parse13FXml(xml: string): {
   }).filter(e => e.shares > 0);
 }
 
-// Fetch 8-K XML by trying multiple common document names
+// Fetch 8-K document (HTML or XML)
+// Accession format: 0001045810-26-000024 → folder path: 000104581026000024
 export async function fetch8KXml(accession: string): Promise<string> {
-  const accessionNoDashes = accession.replace(/-/g, '');
-  // Raw submission .txt file — always available
-  const txtUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}/${accession}.txt`;
-  const txtRes = await edgarFetch(txtUrl);
-  if (txtRes.ok) return txtRes.text();
+  const parts = accession.split('-');
+  const cikPart = parts[0];
+  const yearPart = parts[1];
+  const seqPart = parts[2];
+  const folder = cikPart + yearPart + seqPart;
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${folder}`;
 
-  // Fallback: try stylesheet HTML documents (8-K filings are often .htm files)
-  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(NVDA_CIK)}/${accessionNoDashes}`;
-  const docNames = [
-    '.htm',
-    'form8k.xml',
-    'data.xml',
-    'xslForm8K.xml',
-    'FilingSummary.xml',
-  ];
-  for (const doc of docNames) {
-    const url = `${baseUrl}/${doc}`;
-    const res = await edgarFetch(url);
-    if (res.ok) return res.text();
-  }
-  throw new Error(`Could not find 8-K XML for accession ${accession}`);
+  // Try .htm first (confirmed present; naming pattern: nvda-YYYYMMDD.htm)
+  const htmRes = await edgarFetch(`${baseUrl}.htm`);
+  if (htmRes.ok) return htmRes.text();
+
+  // Try primary_doc.xml
+  const xmlRes = await edgarFetch(`${baseUrl}/primary_doc.xml`);
+  if (xmlRes.ok) return xmlRes.text();
+
+  throw new Error(`Could not find 8-K document for accession ${accession}`);
 }
 
-// Parse 8-K XML (or HTML) into eventType and description
+// Parse 8-K inline XBRL HTML (or plain XML) into eventType and description
 export function parse8KXml(xml: string): {
   eventType: string;
   description: string;
 } {
+  // Attempt XML parse (for plain XML documents)
   const parsed = xmlParser.parse(xml);
   const doc = parsed['document'] ?? parsed;
 
@@ -381,35 +411,27 @@ export function parse8KXml(xml: string): {
     doc['form'] ??
     '8-K';
 
-  const extractText = (obj: any): string => {
-    if (typeof obj === 'string') return obj;
-    if (Array.isArray(obj)) return obj.map(extractText).join(' ');
-    if (obj && typeof obj === 'object') {
-      const vals = Object.values(obj);
-      return vals.map(extractText).join(' ');
-    }
-    return '';
-  };
+  // For inline XBRL HTML, extract dei: fields from raw HTML
+  const docTypeMatch = /name=["']dei:DocumentType["'][^>]*>([^<]+)</.exec(xml);
+  const periodMatch = /name=["']dei:DocumentPeriodEndDate["'][^>]*>([^<]+)</.exec(xml);
+  const extractedType = docTypeMatch ? docTypeMatch[1].trim() : null;
+  const extractedPeriod = periodMatch ? periodMatch[1].trim() : null;
 
-  let rawText = extractText(doc);
-
-  // If rawText is empty (HTML parse produced no text), fall back to scanning the raw
-  // HTML string directly for common 8-K patterns
-  if (!rawText.trim()) {
-    rawText = xml;
-  }
-
-  // For HTML documents, also try to find <sequence>.<item> patterns in raw text
-  const itemPattern = /(?:Item|ITEM)\s+(\d+\.\d+|\d+[A-Z]?)\s*[:\-]?\s*([A-Z][^<\n]{0,200})/gi;
+  // Extract Item numbers and descriptions from HTML headings
+  const itemPattern = /(?:Item|ITEM)\s+(\d+\.\d+|\d+[A-Z]?)\s*[:\-]?\s*([^<\n]{5,200})/gi;
   const items: string[] = [];
   let match;
-  while ((match = itemPattern.exec(rawText)) !== null) {
-    items.push(`Item ${match[1]}: ${match[2].trim()}`);
+  while ((match = itemPattern.exec(xml)) !== null) {
+    const itemNum = match[1].trim();
+    const itemDesc = match[2].replace(/<[^>]+>/g, '').trim().substring(0, 80);
+    if (itemDesc) items.push(`Item ${itemNum}: ${itemDesc}`);
   }
 
+  const typeStr = extractedType ?? String(eventType);
+  const periodStr = extractedPeriod ? ` (${extractedPeriod})` : '';
   const description = items.length > 0
-    ? items.slice(0, 3).join('; ')
-    : '8-K Filing';
+    ? items.slice(0, 3).join('; ') + periodStr
+    : `${typeStr}${periodStr}`;
 
-  return { eventType: String(eventType), description };
+  return { eventType: typeStr, description };
 }
