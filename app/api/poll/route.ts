@@ -44,6 +44,7 @@ export async function GET(req: NextRequest) {
       try {
         const xml = await fetchForm4Xml(filing.accession);
         const parsed = parseForm4Xml(xml);
+        console.log(`Form 4 ${filing.accession}: parsed ${parsed.length} transactions, first=${parsed[0]?.ownerName} shares=${parsed[0]?.shares}`);
         for (const tx of parsed) {
           await supabaseAdmin
             .from('insider_trades')
