@@ -2,11 +2,14 @@
 import { XMLParser } from 'fast-xml-parser';
 
 const NVDA_CIK = '0001045810';
+const NVDA_CUSIP = '67066G104';
+const NVDA_SHARES_OUTSTANDING = 24_500_000_000;
 const USER_AGENT = process.env.EDGAR_USER_AGENT!;
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
+  removeNSPrefix: true,  // strips ns1:, xbrli: etc. so tag lookup works uniformly
 });
 
 const edgarFetch = (url: string) =>
@@ -148,6 +151,131 @@ function accessionToFolder(accession: string): string {
   return parts[0] + parts[1] + parts[2]; // cik(10) + year(2) + seq(6)
 }
 
+// Curated list of the top institutional NVDA holders by EDGAR CIK.
+// The EDGAR EFTS relevance search does not surface these large institutions
+// (they have 10,000+ holdings so NVDA ranks low in text relevance).
+const MAJOR_NVDA_HOLDER_CIKS: { cik: string; fallbackName: string }[] = [
+  { cik: '0000102909', fallbackName: 'Vanguard Group' },
+  { cik: '0001422848', fallbackName: 'Capital Research Global Investors' },
+  { cik: '0000093751', fallbackName: 'State Street' },
+  { cik: '0001214717', fallbackName: 'Geode Capital Management' },
+  { cik: '0000315066', fallbackName: 'FMR LLC' },
+  { cik: '0000895421', fallbackName: 'Morgan Stanley' },
+  { cik: '0000080255', fallbackName: 'T. Rowe Price Associates' },
+  { cik: '0001374170', fallbackName: 'Norges Bank' },
+];
+
+// Fetch the latest 13F-HR accession for each major NVDA holder from their submissions.json.
+export async function fetchMajorNvdaHolderAccessions(): Promise<{
+  cik: string;
+  accession: string;
+  entityName: string;
+  fileDate: string;
+  periodEnding: string;
+}[]> {
+  const results = await Promise.all(
+    MAJOR_NVDA_HOLDER_CIKS.map(async ({ cik, fallbackName }) => {
+      try {
+        const res = await edgarFetch(`https://data.sec.gov/submissions/CIK${cik}.json`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        const recent = data.filings?.recent ?? {};
+        const forms: string[] = recent.form ?? [];
+        const dates: string[] = recent.filingDate ?? [];
+        const reportDates: string[] = recent.reportDate ?? [];
+        const accessions: string[] = recent.accessionNumber ?? [];
+        const idx = forms.findIndex((f) => f === '13F-HR');
+        if (idx === -1) return null;
+        return {
+          cik,
+          accession: accessions[idx],
+          entityName: String(data.name ?? fallbackName),
+          fileDate: dates[idx] ?? '',
+          periodEnding: reportDates[idx] ?? '',
+        };
+      } catch {
+        return null;
+      }
+    })
+  );
+  return results.filter(Boolean) as {
+    cik: string; accession: string; entityName: string; fileDate: string; periodEnding: string;
+  }[];
+}
+
+// Fetch the information table XML for an institution's 13F filing.
+// Parses the filing index to find the correct filename — large filers use
+// non-standard names (e.g. Vanguard: 13F_0000102909_20251231.xml).
+export async function fetchInstitutionInfoTable(cik: string, accession: string): Promise<string> {
+  const folder = accessionToFolder(accession);
+  const baseUrl = `https://www.sec.gov/Archives/edgar/data/${parseInt(cik)}/${folder}`;
+
+  // Parse the index page to find the INFORMATION TABLE document
+  const indexRes = await edgarFetch(`${baseUrl}/${accession}-index.htm`);
+  if (indexRes.ok) {
+    const indexHtml = await indexRes.text();
+    // The index lists documents as: href="...filename.xml"...>...INFORMATION TABLE
+    const match = /href="([^"]+)"[^>]*>[^<]*<\/a><\/td>[^<]*<td[^>]*>INFORMATION TABLE/i.exec(indexHtml);
+    if (match) {
+      const filename = match[1].split('/').pop() ?? '';
+      if (filename) {
+        const fileRes = await edgarFetch(`${baseUrl}/${filename}`);
+        if (fileRes.ok) return fileRes.text();
+      }
+    }
+  }
+
+  // Fallback: try common filenames used by smaller filers
+  for (const filename of ['infotable.xml', 'information_table.xml']) {
+    const res = await edgarFetch(`${baseUrl}/${filename}`);
+    if (res.ok) return res.text();
+  }
+  throw new Error(`Could not find info table for ${cik}/${accession}`);
+}
+
+// Parse an institution's 13F info table and sum all direct NVDA positions.
+// An institution may report NVDA split across multiple sub-managers — all are summed.
+export function findNvdaInInfoTable(xml: string): {
+  shares: number;
+  valueUsd: number;
+  pctOutstanding: number;
+  soleVoting: number;
+} | null {
+  const parsed = xmlParser.parse(xml);
+  const infoTable = parsed['informationTable'] ?? parsed;
+  const rawEntries = infoTable['infoTable'];
+  const entries: any[] = Array.isArray(rawEntries) ? rawEntries : rawEntries ? [rawEntries] : [];
+
+  // All direct NVDA entries (skip options/puts/calls)
+  const nvdaEntries = entries.filter(
+    (e) =>
+      !e['putCall'] &&
+      (String(e['cusip'] ?? '').replace(/\s/g, '') === NVDA_CUSIP ||
+        String(e['nameOfIssuer'] ?? '').toUpperCase().includes('NVIDIA'))
+  );
+  if (nvdaEntries.length === 0) return null;
+
+  // Sum across all sub-manager entries
+  let totalShares = 0;
+  let totalValue = 0;
+  let totalSoleVoting = 0;
+  for (const entry of nvdaEntries) {
+    const shrsTag = entry['shrsOrPrnAmt'] ?? {};
+    const rawShares = shrsTag['sshPrnamt'] ?? '0';
+    totalShares +=
+      parseInt(typeof rawShares === 'object' ? (rawShares['#text'] ?? '0') : String(rawShares)) || 0;
+    const rawValue = entry['value'] ?? '0';
+    const valueStr = typeof rawValue === 'object' ? (rawValue['#text'] ?? '0') : String(rawValue);
+    totalValue += parseFloat(valueStr) || 0;
+    const votingTag = entry['votingAuthority'] ?? {};
+    totalSoleVoting +=
+      parseInt(votingTag['Sole'] ?? votingTag['sole'] ?? votingTag['votingAuthoritySole'] ?? '0') || 0;
+  }
+
+  const pctOutstanding = totalShares / NVDA_SHARES_OUTSTANDING;
+  return { shares: totalShares, valueUsd: totalValue, pctOutstanding, soleVoting: totalSoleVoting };
+}
+
 // Fetch Form 4 XML — .txt raw submission is most reliable
 export async function fetchForm4Xml(accession: string): Promise<string> {
   const folder = accessionToFolder(accession);
@@ -224,11 +352,8 @@ export function parseForm4Xml(xml: string): {
     'Unknown';
 
   const table = document['non-derivative-table'] ?? document['nonDerivativeTable'] ?? {};
-  const transactions: any[] = Array.isArray(table['non-derivative-transaction'])
-    ? table['non-derivative-transaction']
-    : table['nonDerivativeTransaction']
-      ? [table['nonDerivativeTransaction']]
-      : [];
+  const rawTx = table['nonDerivativeTransaction'] ?? table['non-derivative-transaction'];
+  const transactions: any[] = Array.isArray(rawTx) ? rawTx : rawTx ? [rawTx] : [];
 
   for (const tx of transactions) {
     const amounts = tx['transaction-amounts'] ?? tx['transactionAmounts'] ?? {};
@@ -253,10 +378,8 @@ export function parseForm4Xml(xml: string): {
       '0';
     const sharesOwnedAfter = parseInt(sharesAfterRaw) || 0;
 
-    const txCode =
-      getField(amounts, 'transaction-code') ??
-      getField(amounts, 'transactionCode') ??
-      'S';
+    const coding = tx['transactionCoding'] ?? tx['transaction-coding'] ?? {};
+    const txCode = coding['transactionCode'] ?? coding['transaction-code'] ?? 'S';
 
     const directIndirect =
       getField(ownership, 'direct-or-indirect-ownership.value') ??

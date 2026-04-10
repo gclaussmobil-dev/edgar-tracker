@@ -6,7 +6,6 @@ import {
   getNvdaFinancials,
   extractForm4Filings,
   extract8KFilings,
-  extract13FFilings,
   extractRevenue,
   extractNetIncome,
   extractEPS,
@@ -14,8 +13,9 @@ import {
   extractCapitalExpenditures,
   fetchForm4Xml,
   parseForm4Xml,
-  fetch13FInfoTableXml,
-  parse13FXml,
+  fetchMajorNvdaHolderAccessions,
+  fetchInstitutionInfoTable,
+  findNvdaInInfoTable,
   fetch8KXml,
   parse8KXml,
 } from '@/lib/edgar';
@@ -129,32 +129,65 @@ export async function GET(req: NextRequest) {
         );
     }
 
-    // 13F Institutional Holdings: fetch and parse Information Table XML
-    const filings13F = extract13FFilings(submissions);
-    if (filings13F.length > 0) {
-      const latest13F = filings13F[0];
-      try {
-        const xml = await fetch13FInfoTableXml(latest13F.accession);
-        const holdings = parse13FXml(xml);
-        for (const h of holdings) {
-          await supabaseAdmin
-            .from('institutional_holdings')
-            .upsert(
+    // 13F Institutional Holdings: fetch the latest 13F from each major known NVDA holder,
+    // find NVDA in their information table, and store the aggregated position.
+    // Each institution has its own accession number so there is no DB collision.
+    try {
+      const nvdaHolders = await fetchMajorNvdaHolderAccessions();
+      const holderResults: {
+        accession: string;
+        entityName: string;
+        fileDate: string;
+        periodEnding: string;
+        shares: number;
+        valueUsd: number;
+        pctOutstanding: number;
+        soleVoting: number;
+      }[] = [];
+
+      // Fetch in batches of 5 to stay within Lambda timeout
+      for (let i = 0; i < nvdaHolders.length; i += 5) {
+        const batch = nvdaHolders.slice(i, i + 5);
+        const batchResults = await Promise.all(
+          batch.map(async (holder) => {
+            try {
+              const xml = await fetchInstitutionInfoTable(holder.cik, holder.accession);
+              const nvdaPos = findNvdaInInfoTable(xml);
+              if (!nvdaPos || nvdaPos.shares === 0) return null;
+              return { ...holder, ...nvdaPos };
+            } catch (err) {
+              console.error(`13F fetch failed for ${holder.entityName} (${holder.accession}):`, err);
+              return null;
+            }
+          })
+        );
+        holderResults.push(...(batchResults.filter(Boolean) as typeof holderResults));
+      }
+
+      if (holderResults.length > 0) {
+        // Clear all existing holdings (old data was from NVDA's own portfolio, not holders of NVDA)
+        await supabaseAdmin.from('institutional_holdings').delete().gte('created_at', '2000-01-01');
+
+        // Insert fresh data — each institution has its own accession number
+        await Promise.all(
+          holderResults.map((h) =>
+            supabaseAdmin.from('institutional_holdings').upsert(
               {
-                accession_number: latest13F.accession,
-                filed_at: new Date(latest13F.date).toISOString(),
-                institution_name: h.institutionName,
+                accession_number: h.accession,
+                filed_at: new Date(h.fileDate).toISOString(),
+                institution_name: h.entityName,
                 shares_held: h.shares,
                 value_usd: h.valueUsd,
                 pct_outstanding: h.pctOutstanding,
-                quarter_end: new Date().toISOString().split('T')[0],
+                quarter_end: h.periodEnding || new Date().toISOString().split('T')[0],
               },
               { onConflict: 'accession_number', ignoreDuplicates: false }
-            );
-        }
-      } catch (err) {
-        console.error(`Failed to fetch/parse 13F ${latest13F.accession}:`, err);
+            )
+          )
+        );
       }
+    } catch (err) {
+      console.error('13F EFTS search failed:', err);
     }
 
     // 8-K Events: fetch and parse all in parallel
